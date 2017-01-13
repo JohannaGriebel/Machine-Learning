@@ -1,0 +1,184 @@
+---
+title: "Practical Machine Learning - Course Project"
+author: "Joaquin Marques"
+date: "January 11, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+oldw <- getOption("warn")
+options(warn = -1)
+```
+
+## Introduction
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, our goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+### Objective
+The goal of this project is to predict the manner in which the subjects did the exercise. This is the "classe" variable in the training set. The data used was obtained from the following study:
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+### Load training and validation sets
+```{r load}
+setwd("/Users/jmmg57/Documents/Education/Coursera/Data Science Course - John Hopkins University/Machine Learning")
+training <- read.csv(url("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"), 
+                  na.strings=c("NA","#DIV/0!",""))
+validation <- read.csv(url("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"),
+                 na.strings=c("NA","#DIV/0!",""))
+```
+
+### Partition training set into train and test sets
+```{r partition, warning=FALSE}
+library(caret)
+inTrain <- createDataPartition(training$classe, p=0.6, list=FALSE)
+train <- training[inTrain, ]
+test <- training[-inTrain, ]
+dim(train)
+dim(test)
+```
+
+### Data Cleanup
+#### Remove variables with near zero variance, for they contribute very little to result
+```{r cleanup, warning=FALSE}
+nzv <- nearZeroVar(train, saveMetrics=TRUE)
+train <- train[,nzv$nzv==FALSE]
+nzv<- nearZeroVar(test,saveMetrics=TRUE)
+test <- test[,nzv$nzv==FALSE]
+dim(train) 
+dim(test)
+```
+
+#### Remove first column ("X" or row number) from train dataset
+```{r remove1stcolumn, warning=FALSE}
+train <- train[c(-1)]
+dim(train)
+```
+
+#### Remove train cols with more than 75% NAs
+```{r remove75cols, warning=FALSE}
+train <- train[, -which(colMeans(is.na(train)) > 0.75)]
+dim(train)
+```
+
+### Feature Extraction
+#### Get test dataset columns in sync with train dataset columns
+#### Keep only relevant "acceleration" + classe columns
+```{r synchcols, warning=FALSE}
+# Convert set x of column labels (character strings) to set of indices of same columns in dataframe df
+getColIndices <- function(x,df) {
+    result <- c()
+    names <- colnames(df)
+    for (i in 1:length(x)) {
+        index <- match(x[[i]],names)
+        if(!is.na(index)) {
+            result <- append(result,index)
+        }
+    }
+    result
+}
+
+library(plyr)
+library(dplyr)
+train <- train[,grep("accel_|classe",colnames(train))]
+dim(train)
+nzv <- nearZeroVar(train, saveMetrics=TRUE)
+train <- train[,nzv$nzv==FALSE]
+cols <- getColIndices(colnames(train),test)
+test <- select(test,cols)
+cols <- getColIndices(colnames(train),validation)
+validation <- select(validation,cols)
+dim(train)
+dim(test)
+dim(validation)
+colnames(train)
+```
+
+#### Determine if any of the remaining predictors is not important
+```{r boruta, warning=FALSE}
+library(Boruta)
+train1 <- train
+train1 <- train1[complete.cases(train1),]
+convert <- c(1:ncol(train1))
+train1[,convert] <- data.frame(apply(train1[convert], 2, as.factor))
+set.seed(123)
+boruta.train <- Boruta(classe~., data = train1, doTrace = 0)
+print(boruta.train)
+```
+
+Conclusion: All predictors are important!
+
+#### Let us plot the importance of the predictors:
+```{r borutaplot, warning=FALSE}
+plot(boruta.train, xlab = "", xaxt = "n")
+lz<-lapply(1:ncol(boruta.train$ImpHistory),function(i)
+    boruta.train$ImpHistory[is.finite(boruta.train$ImpHistory[,i]),i])
+names(lz) <- colnames(boruta.train$ImpHistory)
+Labels <- sort(sapply(lz,median))
+axis(side = 1,las=2,labels = names(Labels),
+     at = 1:ncol(boruta.train$ImpHistory), cex.axis = 0.7)
+```
+
+### Model Selection & Optimization
+I initially tried gbm as a model and got very high Accuracy (84.7%), and hence low expected sample error, 
+so I decided to see how much a gbm model could be optimized using the caret package.
+I set up a grid with 3 interaction.depths (1, 5, 9), 30 trees of 50 each,
+and constant shrinkage = 0.1 with at least 20 objects per node.
+I set up the control for cross validation with number=5 and repeats=3, 
+and trained the model with metric="ROC"
+```{r trainmodel, warning=FALSE}
+library(caret)
+gbmGrid <-  expand.grid(interaction.depth = c(1, 5, 9), 
+                        n.trees = (1:30)*50,
+                        shrinkage = 0.1,
+                        n.minobsinnode = 20)
+control <- trainControl(method="repeatedcv", number=5, repeats=3, classProbs = TRUE)
+
+set.seed(1234)
+gbm_fit <- train(classe~., data=train, method="gbm",  metric="ROC", tuneGrid = gbmGrid, trControl=control, verbose=FALSE)
+```
+
+The gbm model's training optimization results
+```{r printmodel, warning=FALSE}
+print(gbm_fit)
+```
+
+Plot the gbm model's accuracy vs. # boosting interactions for the 3 interaction.depths (1, 5, 9)
+```{r plotmodel, warning=FALSE}
+plot(gbm_fit)
+```
+
+### Prediction Results
+#### Use prediction model to predict test cases.
+#### Use confusion matrix to compare predicted with actual results
+```{r predicttest, warning=FALSE}
+predictions <- predict(gbm_fit, newdata = test)
+cm <- confusionMatrix(predictions, test$classe)
+print(cm, digits=4)
+```
+
+#### We now use prediction model to predict 20 different validation cases.
+#### Because validation set includes no classe column, we cannot use a
+#### confusion matrix to compare predicted with actual results.
+#### Here is the list of possible results:
+####     - Class A: exactly according to the specification
+####     - Class B: throwing the elbows to the front
+####     - Class C: lifting the dumbbell only halfway
+####     - Class D: lowering the dumbbell only half way
+####     - Class E: throwing the hips to the front.
+#### Only Class A indicates correct execution. The rest indicate common mistakes.
+
+```{r predictvalidation, warning=FALSE}
+predictions <- predict(gbm_fit, newdata = validation)
+predictions
+```
+
+#### Accuracy and Expected sample error
+```{r sampleerror, warning=FALSE}
+accuracy <- cm$overall[[1]]
+accuracy
+sampleError <- round((1 - accuracy)*100,2)
+sampleError
+options(warn = oldw)
+```
